@@ -10,6 +10,7 @@ namespace yii\queue\amqp;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Connection\AMQPStreamConnection;
 use PhpAmqpLib\Message\AMQPMessage;
+use PhpAmqpLib\Wire\AMQPTable;
 use yii\base\Application as BaseApp;
 use yii\base\Event;
 use yii\base\NotSupportedException;
@@ -28,6 +29,7 @@ class Queue extends CliQueue
     public $password = 'guest';
     public $queueName = 'queue';
     public $exchangeName = 'exchange';
+    public $vhost = '/';
 
     /**
      * @var string command class name
@@ -78,19 +80,22 @@ class Queue extends CliQueue
      */
     protected function pushMessage($message, $ttr, $delay, $priority)
     {
-        if ($delay) {
-            throw new NotSupportedException('Delayed work is not supported in the driver.');
-        }
         if ($priority !== null) {
             throw new NotSupportedException('Job priority is not supported in the driver.');
         }
 
-        $this->open();
+        if ($delay) {
+            $this->openForDelayed($delay);
+        } else {
+            $this->open();
+        }
+
         $this->channel->basic_publish(
             new AMQPMessage("$ttr;$message", [
                 'delivery_mode' => AMQPMessage::DELIVERY_MODE_PERSISTENT,
             ]),
-            $this->exchangeName
+            $this->exchangeName,
+            isset($delay) ? $this->queueName.'_delay' : ''
         );
 
         return null;
@@ -110,11 +115,29 @@ class Queue extends CliQueue
     protected function open()
     {
         if ($this->channel) return;
-        $this->connection = new AMQPStreamConnection($this->host, $this->port, $this->user, $this->password);
+        $this->connection = new AMQPStreamConnection($this->host, $this->port, $this->user, $this->password, $this->vhost);
         $this->channel = $this->connection->channel();
         $this->channel->queue_declare($this->queueName, false, true, false, false);
         $this->channel->exchange_declare($this->exchangeName, 'direct', false, true, false);
         $this->channel->queue_bind($this->queueName, $this->exchangeName);
+    }
+
+
+    /**
+     * Opens connection and channel for delayed messages
+     */
+    private function openForDelayed($delay)
+    {
+        if ($this->channel) return;
+        $this->connection = new AMQPStreamConnection($this->host, $this->port, $this->user, $this->password, $this->vhost);
+        $this->channel = $this->connection->channel();
+        $this->channel->queue_declare($this->queueName.'_delay', false, true, false, false, false, new AMQPTable([
+            'x-message-ttl' => $delay,
+            'x-dead-letter-exchange' => $this->exchangeName,
+            'x-dead-letter-routing-key' => ''
+        ]));
+        $this->channel->exchange_declare($this->exchangeName, 'direct', false, true, false);
+        $this->channel->queue_bind($this->queueName.'_delay', $this->exchangeName, $this->queueName.'_delay');
     }
 
     /**
